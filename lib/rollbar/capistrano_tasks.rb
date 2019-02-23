@@ -139,7 +139,7 @@ module Rollbar
             source_maps.each do |source_map|
               minified_url = File.join(url_base, source_map)
               args = *%W(--silent https://api.rollbar.com/api/1/sourcemap -F access_token=#{capistrano.fetch(:rollbar_token)} -F version=#{capistrano.fetch(:rollbar_revision)} -F minified_url=#{minified_url} -F source_map=@./#{source_map})
-              info "curl #{args.join(' ')}" # log the command, since capture doesn't output anything
+              logger.info "curl #{args.join(' ')}" # log the command, since capture doesn't output anything
               api_response_body = capture(:curl, args)
               begin
                 api_response_json = JSON.parse(api_response_body)
