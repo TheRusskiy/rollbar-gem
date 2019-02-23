@@ -139,21 +139,12 @@ module Rollbar
           capistrano.within 'public' do
             source_maps = capistrano.capture(:find, '-name', "'*.js.map'").split("\n")
             source_maps = source_maps.map { |file| file.gsub(/^\.\//, '') }
-            source_maps.each do |source_map|
+            commands = source_maps.map do |source_map|
               minified_url = File.join(url_base, source_map)
-              args = *%W(--silent https://api.rollbar.com/api/1/sourcemap -F access_token=#{capistrano.fetch(:rollbar_token)} -F version=#{capistrano.fetch(:rollbar_revision)} -F minified_url=#{minified_url} -F source_map=@./#{source_map})
-              logger.info "curl #{args.join(' ')} &" # log the command, since capture doesn't output anything
-              api_response_body = capistrano.capture(:curl, args)
-              begin
-                api_response_json = JSON.parse(api_response_body)
-                if api_response_json["err"] != 0
-                  capistrano.warn "Error uploading sourcemaps: #{api_response_json["message"] || 'Unknown Error'}"
-                end
-              rescue JSON::ParserError => e
-                capistrano.warn "Error parsing response: #{e.message}. Response body: #{api_response_body}"
-              end
+              "curl --silent https://api.rollbar.com/api/1/sourcemap -F access_token=#{capistrano.fetch(:rollbar_token)} -F version=#{capistrano.fetch(:rollbar_revision)} -F minified_url=#{minified_url} -F source_map=@./#{source_map}"
             end
-            capistrano.execute('wait')
+            api_responses = capistrano.capture(:parallel, "'#{commands.join('; ')}'")
+            logger.info api_responses
           end
         end
       end
