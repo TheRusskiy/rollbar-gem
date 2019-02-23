@@ -144,10 +144,10 @@ module Rollbar
               begin
                 api_response_json = JSON.parse(api_response_body)
                 if api_response_json["err"] != 0
-                  warn "Error uploading sourcemaps: #{api_response_json["message"] || 'Unknown Error'}"
+                  capistrano.warn "Error uploading sourcemaps: #{api_response_json["message"] || 'Unknown Error'}"
                 end
               rescue JSON::ParserError => e
-                warn "Error parsing response: #{e.message}. Response body: #{api_response_body}"
+                capistrano.warn "Error parsing response: #{e.message}. Response body: #{api_response_body}"
               end
             end
           end
