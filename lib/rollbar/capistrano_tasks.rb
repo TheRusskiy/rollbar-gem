@@ -27,9 +27,13 @@ module Rollbar
 
       def deploy_succeeded(capistrano, logger, dry_run)
         deploy_update(capistrano, logger, dry_run, :desc => 'Setting deployment status to `succeeded` in Rollbar') do
-          report_deploy_succeeded(capistrano, dry_run)
           upload_sourcemaps(capistrano, logger) if capistrano.fetch(:rollbar_sourcemaps_minified_url_base) && !dry_run
+          report_deploy_succeeded(capistrano, dry_run)
         end
+      end
+
+      def upload_sourcemaps(capistrano, logger, dry_run)
+        upload_sourcemaps_with_curl(capistrano, logger) if capistrano.fetch(:rollbar_sourcemaps_minified_url_base) && !dry_run
       end
 
       def deploy_failed(capistrano, logger, dry_run)
@@ -129,7 +133,7 @@ module Rollbar
         logger.info result[:response_info] if result[:response_info]
       end
 
-      def upload_sourcemaps(capistrano, logger)
+      def upload_sourcemaps_with_curl(capistrano, logger)
         url_base = capistrano.fetch(:rollbar_sourcemaps_minified_url_base)
         url_base = "http://#{url_base}" unless url_base.index(/https?:\/\//)
         capistrano.within capistrano.release_path do
@@ -139,7 +143,7 @@ module Rollbar
             source_maps.each do |source_map|
               minified_url = File.join(url_base, source_map)
               args = *%W(--silent https://api.rollbar.com/api/1/sourcemap -F access_token=#{capistrano.fetch(:rollbar_token)} -F version=#{capistrano.fetch(:rollbar_revision)} -F minified_url=#{minified_url} -F source_map=@./#{source_map})
-              logger.info "curl #{args.join(' ')}" # log the command, since capture doesn't output anything
+              logger.info "curl #{args.join(' ')} &" # log the command, since capture doesn't output anything
               api_response_body = capistrano.capture(:curl, args)
               begin
                 api_response_json = JSON.parse(api_response_body)
@@ -150,6 +154,7 @@ module Rollbar
                 capistrano.warn "Error parsing response: #{e.message}. Response body: #{api_response_body}"
               end
             end
+            capistrano.capture(:wait)
           end
         end
       end
