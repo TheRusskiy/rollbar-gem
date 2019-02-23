@@ -153,7 +153,7 @@ module Rollbar
                 capistrano.warn "Error parsing response: #{e.message}. Response body: #{api_response_body}"
               end
             end
-            capistrano.capture(:wait)
+            capistrano.execute('wait')
           end
         end
       end
