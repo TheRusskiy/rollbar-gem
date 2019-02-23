@@ -143,7 +143,7 @@ module Rollbar
               minified_url = File.join(url_base, source_map)
               "curl --silent https://api.rollbar.com/api/1/sourcemap -F access_token=#{capistrano.fetch(:rollbar_token)} -F version=#{capistrano.fetch(:rollbar_revision)} -F minified_url=#{minified_url} -F source_map=@./#{source_map}"
             end
-            api_responses = capistrano.capture(:parallel, "'#{commands.join('; ')}'")
+            api_responses = capistrano.capture("parallel --will-cite ::: #{commands.map {|c| "'#{c}'" }.join(' ')}")
             logger.info api_responses
           end
         end
