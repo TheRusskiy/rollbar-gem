@@ -29,6 +29,7 @@ module Rollbar
         deploy_update(capistrano, logger, dry_run, :desc => 'Setting deployment status to `succeeded` in Rollbar') do
           report_deploy_succeeded(capistrano, dry_run)
         end
+        upload_sourcemaps(capistrano, logger, dry_run)
       end
 
       def upload_sourcemaps(capistrano, logger, dry_run)
@@ -143,7 +144,7 @@ module Rollbar
               minified_url = File.join(url_base, source_map)
               "curl --silent https://api.rollbar.com/api/1/sourcemap -F access_token=#{capistrano.fetch(:rollbar_token)} -F version=#{capistrano.fetch(:rollbar_revision)} -F minified_url=#{minified_url} -F source_map=@./#{source_map}"
             end
-            capistrano.execute("parallel --will-cite ::: #{commands.map {|c| "'#{c}'" }.join(' ')}")
+            capistrano.execute("parallel --will-cite ::: #{commands.map {|c| "'#{c}'" }.join(' ')}", raise_on_non_zero_exit: false)
           end
         end
       end

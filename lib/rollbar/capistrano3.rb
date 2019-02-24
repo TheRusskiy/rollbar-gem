@@ -21,12 +21,12 @@ namespace :rollbar do
     end
   end
 
-  desc 'Upload Sourcemaps'
-  task :upload_sourcemaps do
-    on primary fetch(:rollbar_role) do
-      ::Rollbar::CapistranoTasks.upload_sourcemaps(self, self, dry_run?)
-    end
-  end
+  # desc 'Upload Sourcemaps'
+  # task :upload_sourcemaps do
+  #   on primary fetch(:rollbar_role) do
+  #     ::Rollbar::CapistranoTasks.upload_sourcemaps(self, self, dry_run?)
+  #   end
+  # end
 
   desc 'Send deployment failed notification to Rollbar.'
   task :deploy_failed do
@@ -43,7 +43,7 @@ end
 namespace :deploy do
   after 'deploy:set_current_revision', 'rollbar:deploy_started'
   after 'deploy:finished', 'rollbar:deploy_succeeded'
-  after 'deploy:finished', 'rollbar:upload_sourcemaps'
+  # after 'deploy:finished', 'rollbar:upload_sourcemaps'
   after 'deploy:failed', 'rollbar:deploy_failed'
 
   # Used for testing :deploy_failed task
