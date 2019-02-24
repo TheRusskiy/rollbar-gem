@@ -140,11 +140,15 @@ module Rollbar
           capistrano.within 'public' do
             source_maps = capistrano.capture(:find, '-name', "'*.js.map'").split("\n")
             source_maps = source_maps.map { |file| file.gsub(/^\.\//, '') }
+            source_maps = source_maps
             commands = source_maps.map do |source_map|
               minified_url = File.join(url_base, source_map.gsub(/\.map$/, ''))
-              "curl --silent https://api.rollbar.com/api/1/sourcemap -F access_token=#{capistrano.fetch(:rollbar_token)} -F version=#{capistrano.fetch(:rollbar_revision)} -F minified_url=#{minified_url} -F source_map=@./#{source_map} > /dev/null"
+              "https://api.rollbar.com/api/1/sourcemap -F access_token=#{capistrano.fetch(:rollbar_token)} -F version=#{capistrano.fetch(:current_revision)} -F minified_url=#{minified_url} -F source_map=@#{capistrano.release_path}/public/#{source_map}"
             end
-            capistrano.execute("parallel --jobs #{[(source_maps.length / 3), 1].max} --will-cite ::: #{commands.map {|c| "'#{c}'" }.join(' ')}", raise_on_non_zero_exit: false)
+            if commands.present?
+              cmd = "echo '#{commands.join(' ')}' | xargs -n #{commands.last.split(' ').length} -P 30 curl --silent"
+              capistrano.execute(cmd, raise_on_non_zero_exit: false)
+            end
           end
         end
       end

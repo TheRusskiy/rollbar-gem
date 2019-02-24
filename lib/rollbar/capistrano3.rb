@@ -21,12 +21,12 @@ namespace :rollbar do
     end
   end
 
-  # desc 'Upload Sourcemaps'
-  # task :upload_sourcemaps do
-  #   on primary fetch(:rollbar_role) do
-  #     ::Rollbar::CapistranoTasks.upload_sourcemaps(self, self, dry_run?)
-  #   end
-  # end
+  desc 'Upload Sourcemaps'
+  task :upload_sourcemaps do
+    on primary fetch(:rollbar_role) do
+      ::Rollbar::CapistranoTasks.upload_sourcemaps(self, self, dry_run?)
+    end
+  end
 
   desc 'Send deployment failed notification to Rollbar.'
   task :deploy_failed do
