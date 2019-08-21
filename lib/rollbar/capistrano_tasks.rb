@@ -138,7 +138,7 @@ module Rollbar
         url_base = "http://#{url_base}" unless url_base.index(/https?:\/\//)
         capistrano.within capistrano.release_path do
           capistrano.within 'public' do
-            source_maps = capistrano.capture(:find, '-name', "'*.js.map'").split("\n")
+            source_maps = capistrano.capture(:find, '-L', '-name', "'*.js.map'").split("\n")
             source_maps = source_maps.map { |file| file.gsub(/^\.\//, '') }
             commands = source_maps.map do |source_map|
               minified_url = File.join(url_base, source_map.gsub(/\.map$/, ''))
