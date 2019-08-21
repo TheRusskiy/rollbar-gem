@@ -140,14 +140,16 @@ module Rollbar
           capistrano.within 'public' do
             source_maps = capistrano.capture(:find, '-name', "'*.js.map'").split("\n")
             source_maps = source_maps.map { |file| file.gsub(/^\.\//, '') }
-            source_maps = source_maps
             commands = source_maps.map do |source_map|
               minified_url = File.join(url_base, source_map.gsub(/\.map$/, ''))
               "https://api.rollbar.com/api/1/sourcemap -F access_token=#{capistrano.fetch(:rollbar_token)} -F version=#{capistrano.fetch(:current_revision)} -F minified_url=#{minified_url} -F source_map=@#{capistrano.release_path}/public/#{source_map}"
             end
             if commands.length > 0
               cmd = "echo '#{commands.join(' ')}' | xargs -n #{commands.last.split(' ').length} -P 30 curl --silent"
-              capistrano.execute(cmd, raise_on_non_zero_exit: false)
+              logger.info(cmd)
+              capistrano.execute(cmd, raise_on_non_zero_exit: true)
+            else
+              logger.info("no source maps found")
             end
           end
         end
