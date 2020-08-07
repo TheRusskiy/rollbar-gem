@@ -1,5 +1,4 @@
 require 'rollbar/deploy'
-require 'json'
 
 module Rollbar
   # Module containing the logic of Capistrano tasks for deploy tracking
