@@ -2,6 +2,13 @@ require 'rubygems/version'
 
 source 'https://rubygems.org'
 
+# Used by spec/commands/rollbar_rails_runner_spec, and can be used whenever a
+# new process is created during tests. (Testing rake tasks, for example.)
+# This is a workaround for ENV['BUNDLE_GEMFILE'] not working as expected on Travis.
+# We use the ||= assignment because Travis loads the gemfile twice, the second time
+# with the wrong gemfile path.
+ENV['CURRENT_GEMFILE'] ||= __FILE__
+
 is_jruby = defined?(JRUBY_VERSION) || (defined?(RUBY_ENGINE) && 'jruby' == RUBY_ENGINE)
 is_not_jruby = !is_jruby
 
@@ -20,25 +27,21 @@ platforms :rbx do
   gem 'rubysl', '~> 2.0' unless RUBY_VERSION.start_with?('1')
 end
 
-unless is_jruby
-  if RUBY_VERSION >= '2.5'
-    gem 'oj'
-  elsif RUBY_VERSION >= '2.4.0'
-    gem 'oj', '~> 2.16.1'
-  else
-    gem 'oj', '~> 2.12.14'
-  end
+if RUBY_VERSION < '2.0.0'
+  gem 'json', '1.8.6'
 end
 
-if RUBY_VERSION > '1.8.7' && RUBY_VERSION < '2.2.2'
+if RUBY_VERSION < '2.2.2'
   gem 'sidekiq', '~> 2.13.0'
 else
   gem 'sidekiq', '>= 2.13.0'
 end
 
 if RUBY_VERSION.start_with?('1.9')
+  gem 'capistrano', '<= 3.4.1', :require => false
   gem 'shoryuken', '>= 4.0.0', '<= 4.0.2'
 elsif RUBY_VERSION.start_with?('2')
+  gem 'capistrano', :require => false
   gem 'shoryuken'
 end
 

@@ -21,6 +21,7 @@ module Rollbar
 
           Rollbar.scoped(scope) do
             begin
+              Rollbar.notifier.enable_locals
               response = @app.call(env)
 
               if (framework_exception = env['action_dispatch.exception'])
@@ -31,6 +32,8 @@ module Rollbar
             rescue Exception => exception
               report_exception_to_rollbar(env, exception)
               raise
+            ensure
+              Rollbar.notifier.disable_locals
             end
           end
         end
@@ -62,7 +65,13 @@ module Rollbar
           block = proc { extract_person_data_from_controller(env) }
           return block unless defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
 
-          proc { ActiveRecord::Base.connection_pool.with_connection(&block) }
+          proc do
+            begin
+              ActiveRecord::Base.connection_pool.with_connection(&block)
+            rescue ActiveRecord::ConnectionTimeoutError
+              {}
+            end
+          end
         end
 
         def context(request_data)

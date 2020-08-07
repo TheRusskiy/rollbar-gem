@@ -1,14 +1,12 @@
 require 'spec_helper'
 
-unless RUBY_VERSION == '1.8.7'
-  require 'sidekiq'
-end
+require 'sidekiq'
 
 Rollbar.plugins.load!
 
 describe Rollbar::Sidekiq::ClearScope, :reconfigure_notifier => false do
   describe '#call' do
-    let(:middleware_block) { proc{} }
+    let(:middleware_block) { proc {} }
 
     it 'sends the error to Rollbar::Sidekiq.handle_exception' do
       expect(Rollbar).to receive(:reset_notifier!)
@@ -16,4 +14,4 @@ describe Rollbar::Sidekiq::ClearScope, :reconfigure_notifier => false do
       subject.call(nil, nil, nil, &middleware_block)
     end
   end
-end unless RUBY_VERSION == '1.8.7'
+end

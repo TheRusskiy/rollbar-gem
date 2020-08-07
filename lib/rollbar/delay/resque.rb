@@ -23,12 +23,9 @@ module Rollbar
         end
 
         def perform(payload)
-          begin
-            Rollbar.process_from_async_handler(payload)
-          rescue
-            # Raise the exception so Resque can track the errored job
-            raise
-          end
+          Rollbar.process_from_async_handler(payload)
+
+          # Do not rescue. Resque will call the error handler.
         end
       end
     end

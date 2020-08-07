@@ -7,10 +7,10 @@ Rollbar.plugins.load!
 
 describe Rollbar::Delayed, :reconfigure_notifier => true do
   class FailingJob
-    class TestException < Exception; end
+    class TestException < RuntimeError; end
 
-    def do_job_please!(a, b)
-      this = will_crash_again!
+    def do_job_please!(_a, _b)
+      _this = will_crash_again!
     end
   end
 
@@ -32,33 +32,58 @@ describe Rollbar::Delayed, :reconfigure_notifier => true do
 
       FailingJob.new.delay.do_job_please!(:foo, :bar)
     end
+
+    it 'adds the job data' do
+      payload = nil
+
+      ::Rollbar::Item.any_instance.stub(:dump) do |item|
+        payload = item.payload
+        nil
+      end
+
+      FailingJob.new.delay.do_job_please!(:foo, :bar)
+
+      expect(payload['data'][:request]["handler"]).to include({:args=>[:foo, :bar], :method_name=>:do_job_please!})
+    end
   end
 
   context 'with failed deserialization' do
-    let(:expected_args) do
-      [/Delayed::DeserializationError/, {:use_exception_level_filters=>true}]
+    let(:old_expected_args) do
+      [/Delayed::DeserializationError/, { :use_exception_level_filters => true }]
     end
+    let(:new_expected_args) do
+      [instance_of(Delayed::DeserializationError), { :use_exception_level_filters => true }]
+    end
+
 
     it 'sends the exception' do
       expect(Rollbar).to receive(:scope).with(kind_of(Hash)).and_call_original
       allow_any_instance_of(Delayed::Backend::Base).to receive(:payload_object).and_raise(Delayed::DeserializationError)
-      expect_any_instance_of(Rollbar::Notifier).to receive(:error).with(*expected_args)
+      if Delayed::Backend::Base.method_defined? :error
+        expect_any_instance_of(Rollbar::Notifier).to receive(:error).with(*new_expected_args)
+      else
+        expect_any_instance_of(Rollbar::Notifier).to receive(:error).with(*old_expected_args)
+      end
 
       FailingJob.new.delay.do_job_please!(:foo, :bar)
     end
-    
+
     context 'with dj_threshold > 0' do
       before do
         Rollbar.configure do |config|
           config.dj_threshold = 1
         end
       end
-      
+
       it 'sends the exception' do
         expect(Rollbar).to receive(:scope).with(kind_of(Hash)).and_call_original
         allow_any_instance_of(Delayed::Backend::Base).to receive(:payload_object).and_raise(Delayed::DeserializationError)
-        expect_any_instance_of(Rollbar::Notifier).to receive(:error).with(*expected_args)
-  
+        if Delayed::Backend::Base.method_defined? :error
+          expect_any_instance_of(Rollbar::Notifier).to receive(:error).with(*new_expected_args)
+        else
+          expect_any_instance_of(Rollbar::Notifier).to receive(:error).with(*old_expected_args)
+        end
+
         FailingJob.new.delay.do_job_please!(:foo, :bar)
       end
     end

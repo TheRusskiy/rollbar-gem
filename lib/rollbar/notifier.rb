@@ -8,6 +8,7 @@ require 'rollbar/delay/girl_friday'
 require 'rollbar/delay/thread'
 require 'rollbar/logger_proxy'
 require 'rollbar/item'
+require 'rollbar/notifier/trace_with_bindings'
 require 'ostruct'
 
 module Rollbar
@@ -18,7 +19,9 @@ module Rollbar
     attr_accessor :last_report
     attr_accessor :scope_object
 
-    @file_semaphore = Mutex.new
+    MUTEX = Mutex.new
+    EXTENSION_REGEXP = /.rollbar\z/.freeze
+    FAILSAFE_STRING_LENGTH = 10_000
 
     def initialize(parent_notifier = nil, payload_options = nil, scope = nil)
       if parent_notifier
@@ -41,21 +44,21 @@ module Rollbar
     # Similar to configure below, but used only internally within the gem
     # to configure it without initializing any of the third party hooks
     def preconfigure
-      yield(configuration)
+      yield(configuration.configured_options)
     end
 
     # Configures the notifier instance
     def configure
       configuration.enabled = true if configuration.enabled.nil?
 
-      yield(configuration)
+      yield(configuration.configured_options)
     end
 
     def reconfigure
       self.configuration = Configuration.new
       configuration.enabled = true
 
-      yield(configuration)
+      yield(configuration.configured_options)
     end
 
     def unconfigure
@@ -95,17 +98,17 @@ module Rollbar
     # @yield Block which exceptions won't be reported.
     def silenced
       yield
-    rescue => e
+    rescue StandardError => e
       e.instance_variable_set(:@_rollbar_do_not_report, true)
       raise
     end
 
     # Sends a report to Rollbar.
     #
-    # Accepts any number of arguments. The last String argument will become
-    # the message or description of the report. The last Exception argument
-    # will become the associated exception for the report. The last hash
-    # argument will be used as the extra data for the report.
+    # Accepts a level string plus any number of arguments. The last String
+    # argument will become the message or description of the report. The last
+    # Exception argument will become the associated exception for the report.
+    # The last hash argument will be used as the extra data for the report.
     #
     # If the extra hash contains a symbol key :custom_data_method_context
     # the value of the key will be used as the context for
@@ -116,17 +119,17 @@ module Rollbar
     #   begin
     #     foo = bar
     #   rescue => e
-    #     Rollbar.log(e)
+    #     Rollbar.log('error', e)
     #   end
     #
     # @example
-    #   Rollbar.log('This is a simple log message')
+    #   Rollbar.log('info', 'This is a simple log message')
     #
     # @example
-    #   Rollbar.log(e, 'This is a description of the exception')
+    #   Rollbar.log('error', e, 'This is a description of the exception')
     #
     def log(level, *args)
-      return 'disabled' unless configuration.enabled
+      return 'disabled' unless enabled?
 
       message, exception, extra, context = extract_arguments(args)
       use_exception_level_filters = use_exception_level_filters?(extra)
@@ -146,13 +149,25 @@ module Rollbar
       level = lookup_exception_level(level, exception,
                                      use_exception_level_filters)
 
-      begin
-        report(level, message, exception, extra, context)
-      rescue StandardError, SystemStackError => e
-        report_internal_error(e)
+      ret = report_with_rescue(level, message, exception, extra, context)
 
-        'error'
-      end
+      raise(exception) if configuration.raise_on_error && exception
+
+      ret
+    end
+
+    def report_with_rescue(level, message, exception, extra, context)
+      report(level, message, exception, extra, context)
+    rescue StandardError, SystemStackError => e
+      original_error = {
+        :message => message,
+        :exception => exception,
+        :configuration => configuration
+      }
+
+      report_internal_error(e, original_error)
+
+      'error'
     end
 
     # See log() above
@@ -185,21 +200,28 @@ module Rollbar
       log('critical', *args)
     end
 
+    def enabled?
+      # Require access_token so we don't try to send events when unconfigured.
+      configuration.enabled && configuration.access_token && !configuration.access_token.empty?
+    end
+
     def process_item(item)
       if configuration.write_to_file
         if configuration.use_async
-          @file_semaphore.synchronize do
-            write_item(item)
+          MUTEX.synchronize do
+            do_write_item(item)
           end
         else
-          write_item(item)
+          do_write_item(item)
         end
       else
         send_item(item)
       end
-    rescue => e
+    rescue StandardError => e
       log_error("[Rollbar] Error processing the item: #{e.class}, #{e.message}. Item: #{item.payload.inspect}")
-      raise e
+      raise e unless via_failsafe?(item)
+
+      log_error('[Rollbar] Item has already failed. Not re-raising')
     end
 
     # We will reraise exceptions in this method so async queues
@@ -226,17 +248,20 @@ module Rollbar
     # Using Rollbar.silenced we avoid the above behavior but Sidekiq
     # will have a chance to retry the original job.
     def process_from_async_handler(payload)
-      payload = Rollbar::JSON.load(payload) if payload.is_a?(String)
-
-      item = Item.build_with(payload,
-                             :notifier => self,
-                             :configuration => configuration,
-                             :logger => logger)
-
       Rollbar.silenced do
         begin
-          process_item(item)
-        rescue => e
+          if payload.is_a?(String)
+            # The final payload has already been built.
+            send_body(payload)
+          else
+            item = Item.build_with(payload,
+                                   :notifier => self,
+                                   :configuration => configuration,
+                                   :logger => logger)
+
+            process_item(item)
+          end
+        rescue StandardError => e
           report_internal_error(e)
 
           raise
@@ -244,35 +269,34 @@ module Rollbar
       end
     end
 
-    def send_failsafe(message, exception, uuid = nil, host = nil)
-      exception_reason = failsafe_reason(message, exception)
-
-      log_error "[Rollbar] Sending failsafe response due to #{exception_reason}"
-
-      body = failsafe_body(exception_reason)
-
-      failsafe_data = {
+    def failsafe_initial_data(exception_reason)
+      {
         :level => 'error',
         :environment => configuration.environment.to_s,
         :body => {
           :message => {
-            :body => body
+            :body => failsafe_body(exception_reason)
           }
         },
         :notifier => {
           :name => 'rollbar-gem',
           :version => VERSION
         },
-        :custom => {
-          :orig_uuid => uuid,
-          :orig_host => host
-        },
         :internal => true,
-        :failsafe => true
+        'failsafe' => true
       }
+    end
+
+    def send_failsafe(message, exception, original_error = nil)
+      exception_reason = failsafe_reason(message, exception)
+
+      log_error "[Rollbar] Sending failsafe response due to #{exception_reason}"
+
+      failsafe_data = failsafe_initial_data(exception_reason)
+
+      failsafe_add_original_error_data(failsafe_data[:notifier], original_error)
 
       failsafe_payload = {
-        'access_token' => configuration.access_token,
         'data' => failsafe_data
       }
 
@@ -281,16 +305,69 @@ module Rollbar
                                :notifier => self,
                                :configuration => configuration,
                                :logger => logger)
-        schedule_item(item)
-      rescue => e
+
+        process_item(item)
+        log_and_return_item_data(item)
+      rescue StandardError => e
         log_error "[Rollbar] Error sending failsafe : #{e}"
       end
 
       failsafe_payload
     end
 
+    def failsafe_add_original_error_data(payload_notifier, original_error)
+      return unless original_error
+
+      payload_notifier[:diagnostic] ||= {}
+
+      add_original_host(payload_notifier[:diagnostic], original_error)
+      add_original_uuid(payload_notifier[:diagnostic], original_error)
+      add_original_message(payload_notifier[:diagnostic], original_error)
+      add_original_error(payload_notifier[:diagnostic], original_error)
+      add_configured_options(payload_notifier, original_error)
+    end
+
+    def add_original_message(diagnostic, original_error)
+        diagnostic[:original_message] = original_error[:message].truncate(FAILSAFE_STRING_LENGTH) if original_error[:message]
+
+    rescue StandardError => e
+      diagnostic[:original_message] = "Failed: #{e.message}"
+    end
+
+    def add_original_error(diagnostic, original_error)
+      if original_error[:exception]
+        backtrace = original_error[:exception].backtrace
+        message = original_error[:exception].message
+        diagnostic[:original_error] = {
+          :message => message && message.truncate(FAILSAFE_STRING_LENGTH),
+          :stack => backtrace && backtrace.join(', ').truncate(FAILSAFE_STRING_LENGTH)
+        }
+      end
+
+    rescue StandardError => e
+      diagnostic[:original_error] = "Failed: #{e.message}"
+    end
+
+    def add_configured_options(payload_notifier, original_error)
+      if original_error[:configuration]
+        configured = original_error[:configuration].configured_options.configured
+        payload_notifier[:configured_options] = ::JSON.generate(configured).truncate(FAILSAFE_STRING_LENGTH)
+      end
+
+    rescue StandardError => e
+      payload_notifier[:configured_options] = "Failed: #{e.message}"
+    end
+
+    def add_original_host(diagnostic, original_error)
+      diagnostic[:original_host] = original_error[:host] if original_error[:host]
+    end
+
+    def add_original_uuid(diagnostic, original_error)
+      diagnostic[:original_uuid] = original_error[:uuid] if original_error[:uuid]
+    end
+
     ## Logging
-    %w(debug info warn error).each do |level|
+    %w[debug info warn error].each do |level|
       define_method(:"log_#{level}") do |message|
         logger.send(level, message)
       end
@@ -298,6 +375,30 @@ module Rollbar
 
     def logger
       @logger ||= LoggerProxy.new(configuration.logger)
+    end
+
+    def trace_with_bindings
+      @trace_with_bindings ||= TraceWithBindings.new
+    end
+
+    def exception_bindings
+      trace_with_bindings.exception_frames
+    end
+
+    def current_bindings
+      trace_with_bindings.frames
+    end
+
+    def enable_locals?
+      configuration.locals[:enabled] && [:app, :all].include?(configuration.send_extra_frame_data)
+    end
+
+    def enable_locals
+      trace_with_bindings.enable if enable_locals?
+    end
+
+    def disable_locals
+      trace_with_bindings.disable if enable_locals?
     end
 
     private
@@ -326,7 +427,7 @@ module Rollbar
           return 'ignored' if status == 'ignored'
         rescue Rollbar::Ignore
           raise
-        rescue => e
+        rescue StandardError => e
           log_error("[Rollbar] Error calling the `before_process` hook: #{e}")
 
           break
@@ -399,43 +500,52 @@ module Rollbar
 
       return 'ignored' if item.ignored?
 
-      schedule_item(item)
+      schedule_item(item) if configuration.transmit
 
+      log_and_return_item_data(item)
+    end
+
+    def log_and_return_item_data(item)
       data = item['data']
       log_instance_link(data)
       Rollbar.last_report = data
+      log_data(data) if configuration.log_payload
 
       data
+    end
+
+    def log_data(data)
+      log_info "[Rollbar] Data: #{data}"
     end
 
     # Reports an internal error in the Rollbar library. This will be reported within the configured
     # Rollbar project. We'll first attempt to provide a report including the exception traceback.
     # If that fails, we'll fall back to a more static failsafe response.
-    def report_internal_error(exception)
+    def report_internal_error(exception, original_error = nil)
       log_error '[Rollbar] Reporting internal error encountered while sending data to Rollbar.'
 
       configuration.execute_hook(:on_report_internal_error, exception)
 
       begin
         item = build_item('error', nil, exception, { :internal => true }, nil)
-      rescue => e
-        send_failsafe('build_item in exception_data', e)
+      rescue StandardError => e
+        send_failsafe('build_item in exception_data', e, original_error)
         log_error "[Rollbar] Exception: #{exception}"
         return
       end
 
       begin
         process_item(item)
-      rescue => e
-        send_failsafe('error in process_item', e)
+      rescue StandardError => e
+        send_failsafe('error in process_item', e, original_error)
         log_error "[Rollbar] Item: #{item}"
         return
       end
 
       begin
         log_instance_link(item['data'])
-      rescue => e
-        send_failsafe('error logging instance link', e)
+      rescue StandardError => e
+        send_failsafe('error logging instance link', e, original_error)
         log_error "[Rollbar] Item: #{item}"
         return
       end
@@ -464,14 +574,18 @@ module Rollbar
 
     ## Delivery functions
 
-    def send_item_using_eventmachine(item, uri)
-      body = item.dump
-      return unless body
+    def send_using_eventmachine(body)
+      uri = URI.parse(configuration.endpoint)
 
-      headers = { 'X-Rollbar-Access-Token' => item['access_token'] }
+      headers = { 'X-Rollbar-Access-Token' => configuration.access_token }
       options = http_proxy_for_em(uri)
       req = EventMachine::HttpRequest.new(uri.to_s, options).post(:body => body, :head => headers)
 
+      eventmachine_callback(req)
+      eventmachine_errback(req)
+    end
+
+    def eventmachine_callback(req)
       req.callback do
         if req.response_header.status == 200
           log_info '[Rollbar] Success'
@@ -480,7 +594,9 @@ module Rollbar
           log_info "[Rollbar] Response: #{req.response}"
         end
       end
+    end
 
+    def eventmachine_errback(req)
       req.errback do
         log_warning "[Rollbar] Call to API failed, status code: #{req.response_header.status}"
         log_info "[Rollbar] Error's response: #{req.response}"
@@ -493,14 +609,20 @@ module Rollbar
       body = item.dump
       return unless body
 
-      uri = URI.parse(configuration.endpoint)
-
       if configuration.use_eventmachine
-        send_item_using_eventmachine(item, uri)
+        send_using_eventmachine(body)
         return
       end
 
-      handle_response(do_post(uri, body, item['access_token']))
+      send_body(body)
+    end
+
+    def send_body(body)
+      log_info '[Rollbar] Sending json'
+
+      uri = URI.parse(configuration.endpoint)
+
+      handle_response(do_post(uri, body, configuration.access_token))
     end
 
     def do_post(uri, body, access_token)
@@ -512,8 +634,6 @@ module Rollbar
 
       if uri.scheme == 'https'
         http.use_ssl = true
-        # This is needed to have 1.8.7 passing tests
-        http.ca_file = ENV['ROLLBAR_SSL_CERT_FILE'] if ENV.key?('ROLLBAR_SSL_CERT_FILE')
         http.verify_mode = ssl_verify_mode
       end
 
@@ -594,7 +714,7 @@ module Rollbar
     end
 
     def skip_retries?
-      Rollbar::LanguageSupport.ruby_18? || Rollbar::LanguageSupport.ruby_19?
+      Rollbar::LanguageSupport.ruby_19?
     end
 
     def handle_response(response)
@@ -615,32 +735,41 @@ module Rollbar
       end
     end
 
-    def write_item(item)
-      if configuration.use_async
-        @file_semaphore.synchronize do
-          do_write_item(item)
-        end
-      else
-        do_write_item(item)
-      end
-    end
-
     def do_write_item(item)
       log_info '[Rollbar] Writing item to file'
 
       body = item.dump
       return unless body
 
+      file_name = if configuration.files_with_pid_name_enabled
+                    configuration.filepath.gsub(EXTENSION_REGEXP, "_#{Process.pid}\\0")
+                  else
+                    configuration.filepath
+                  end
+
       begin
-        @file ||= File.open(configuration.filepath, 'a')
+        @file ||= File.open(file_name, 'a')
 
         @file.puts(body)
         @file.flush
+        update_file(@file, file_name)
 
         log_info '[Rollbar] Success'
       rescue IOError => e
         log_error "[Rollbar] Error opening/writing to file: #{e}"
       end
+    end
+
+    def update_file(file, file_name)
+      return unless configuration.files_processed_enabled
+
+      time_now = Time.now
+      return if configuration.files_processed_duration > time_now - file.birthtime && file.size < configuration.files_processed_size
+
+      new_file_name = file_name.gsub(EXTENSION_REGEXP, "_processed_#{time_now.to_i}\\0")
+      File.rename(file, new_file_name)
+      file.close
+      @file = File.open(file_name, 'a')
     end
 
     def failsafe_reason(message, exception)
@@ -653,17 +782,17 @@ module Rollbar
 
           exception_info = exception.class.name
           # #to_s and #message defaults to class.to_s. Add message only if add valuable info.
-          exception_info += %(: "#{exception.message}") if exception.message != exception.class.to_s
+          exception_info += %[: "#{exception.message}"] if exception.message != exception.class.to_s
           exception_info += " in #{nearest_frame}" if nearest_frame
 
           body += "#{exception_info}: #{message}"
-        rescue
+        rescue StandardError
           log_error('[Rollbar] Error building failsafe exception message')
         end
       else
         begin
           body += message.to_s
-        rescue
+        rescue StandardError
           log_error('[Rollbar] Error building failsafe message')
         end
       end
@@ -694,9 +823,12 @@ module Rollbar
     end
 
     def process_async_item(item)
+      # Send async payloads as JSON string when async_json_payload is set.
+      payload = configuration.async_json_payload ? item.dump : item.payload
+
       configuration.async_handler ||= default_async_handler
-      configuration.async_handler.call(item.payload)
-    rescue
+      configuration.async_handler.call(payload)
+    rescue StandardError
       if configuration.failover_handlers.empty?
         log_error '[Rollbar] Async handler failed, and there are no failover handlers configured. See the docs for "failover_handlers"'
         return
@@ -713,7 +845,7 @@ module Rollbar
       failover_handlers.each do |handler|
         begin
           handler.call(item.payload)
-        rescue
+        rescue StandardError
           next unless handler == failover_handlers.last
 
           log_error "[Rollbar] All failover handlers failed while processing item: #{Rollbar::JSON.dump(item.payload)}"
@@ -721,13 +853,17 @@ module Rollbar
       end
     end
 
-    alias_method :log_warning, :log_warn
+    alias log_warning log_warn
 
     def log_instance_link(data)
       return unless data[:uuid]
 
       uuid_url = Util.uuid_rollbar_url(data, configuration)
       log_info "[Rollbar] Details: #{uuid_url} (only available if report was successful)"
+    end
+
+    def via_failsafe?(item)
+      item.payload.fetch('data', {}).fetch('failsafe', false)
     end
   end
 end

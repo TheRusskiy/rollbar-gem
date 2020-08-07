@@ -12,6 +12,7 @@ require 'rollbar/util'
 require 'rollbar/encoding'
 require 'rollbar/truncation'
 require 'rollbar/json'
+require 'rollbar/scrubbers/params'
 
 module Rollbar
   # This class represents the payload to be sent to the API.
@@ -64,7 +65,6 @@ module Rollbar
     def build
       data = build_data
       self.payload = {
-        'access_token' => configuration.access_token,
         'data' => data
       }
 
@@ -83,7 +83,8 @@ module Rollbar
         :server => server_data,
         :notifier => {
           :name => 'rollbar-gem',
-          :version => VERSION
+          :version => VERSION,
+          :configured_options => configured_options
         },
         :body => build_body
       }
@@ -101,27 +102,59 @@ module Rollbar
       data
     end
 
+    def configured_options
+      if Gem.loaded_specs['activesupport'] && Gem.loaded_specs['activesupport'].version < Gem::Version.new('4.1')
+        # There are too many types that crash ActiveSupport JSON serialization, and not worth
+        # the risk just to send this diagnostic object. In versions < 4.1, ActiveSupport hooks
+        # Ruby's JSON.generate so deeply there's no workaround.
+        'not serialized in ActiveSupport < 4.1'
+      elsif configuration.use_async && !configuration.async_json_payload
+        # The setting allows serialization to be performed by each handler,
+        # and this usually means it is actually performed by ActiveSupport,
+        # which cannot safely serialize this key.
+        'not serialized when async_json_payload is not set'
+      else
+        scrub(configuration.configured_options.configured)
+      end
+    end
+
     def dump
       # Ensure all keys are strings since we can receive the payload inline or
       # from an async handler job, which can be serialized.
       stringified_payload = Util::Hash.deep_stringify_keys(payload)
-      result = Truncation.truncate(stringified_payload)
+      attempts = []
+      result = Truncation.truncate(stringified_payload, attempts)
 
       return result unless Truncation.truncate?(result)
 
-      handle_too_large_payload(stringified_payload, result)
+      handle_too_large_payload(stringified_payload, result, attempts)
 
       nil
     end
 
-    def handle_too_large_payload(stringified_payload, final_payload)
-      original_size = Rollbar::JSON.dump(stringified_payload).bytesize
-      final_size = final_payload.bytesize
+    def handle_too_large_payload(stringified_payload, final_payload, attempts)
       uuid = stringified_payload['data']['uuid']
       host = stringified_payload['data'].fetch('server', {})['host']
 
-      notifier.send_failsafe("Could not send payload due to it being too large after truncating attempts. Original size: #{original_size} Final size: #{final_size}", nil, uuid, host)
+      original_error = {
+        :message => message,
+        :exception => exception,
+        :configuration => configuration,
+        :uuid => uuid,
+        :host => host
+      }
+
+      notifier.send_failsafe(
+        too_large_payload_string(attempts),
+        nil,
+        original_error
+      )
       logger.error("[Rollbar] Payload too large to be sent for UUID #{uuid}: #{Rollbar::JSON.dump(payload)}")
+    end
+
+    def too_large_payload_string(attempts)
+      'Could not send payload due to it being too large after truncating attempts. ' \
+        "Original size: #{attempts.first} Attempts: #{attempts.join(', ')} Final size: #{attempts.last}"
     end
 
     def ignored?
@@ -156,11 +189,17 @@ module Rollbar
     end
 
     def build_extra
+      merged_extra = Util.deep_merge(scrub(extra), scrub(error_context))
+
       if custom_data_method? && !Rollbar::Util.method_in_stack(:custom_data, __FILE__)
-        Util.deep_merge(scrub(custom_data), scrub(extra) || {})
+        Util.deep_merge(scrub(custom_data), merged_extra)
       else
-        scrub(extra)
+        merged_extra.empty? ? nil : merged_extra # avoid putting an empty {} in the payload.
       end
+    end
+
+    def error_context
+      exception.respond_to?(:rollbar_context) && exception.rollbar_context
     end
 
     def scrub(data)
@@ -179,14 +218,14 @@ module Rollbar
     end
 
     def custom_data
-      if configuration.custom_data_method.arity == 3
-        data = configuration.custom_data_method.call(message, exception, context)
-      else
-        data = configuration.custom_data_method.call
-      end
+      data = if configuration.custom_data_method.arity == 3
+               configuration.custom_data_method.call(message, exception, context)
+             else
+               configuration.custom_data_method.call
+             end
 
       Rollbar::Util.deep_copy(data)
-    rescue => e
+    rescue StandardError => e
       return {} if configuration.safely?
 
       report_custom_data_error(e)
@@ -231,7 +270,7 @@ module Rollbar
       handlers.each do |handler|
         begin
           handler.call(transform_options)
-        rescue => e
+        rescue StandardError => e
           logger.error("[Rollbar] Error calling the `transform` hook: #{e}")
 
           break

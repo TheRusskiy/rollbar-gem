@@ -9,15 +9,37 @@ class SinatraDummy < Sinatra::Base
   use Rollbar::Middleware::Sinatra
 
   get '/foo' do
-    raise DummyError.new
+    raise DummyError
   end
 
   get '/bar' do
     'this will not crash'
   end
 
+  get '/cause_exception_with_locals' do
+    cause_exception_with_locals
+  end
+
   post '/crash_post' do
-    raise DummyError.new
+    raise DummyError
+  end
+
+  def cause_exception_with_locals
+    foo = false
+
+    (0..2).each do |index|
+      foo = Post
+
+      build_hash_with_locals(foo, index)
+    end
+  end
+
+  def build_hash_with_locals(foo, _index)
+    foo.tap do |obj|
+      bar = 'bar'
+      hash = { :foo => obj, :bar => bar }
+      hash.invalid_method
+    end
   end
 end
 
@@ -61,6 +83,20 @@ describe Rollbar::Middleware::Sinatra, :reconfigure_notifier => true do
           expect do
             get '/foo'
           end.to raise_error(SinatraDummy::DummyError)
+        end
+
+        context 'with capture_uncaught == false' do
+          before do
+            Rollbar.configure do |config|
+              config.capture_uncaught = false
+            end
+          end
+
+          it 'should not report the exception' do
+            expect(Rollbar).to_not receive(:log)
+
+            expect { get '/foo' }.to raise_error(SinatraDummy::DummyError)
+          end
         end
       end
 
@@ -146,7 +182,7 @@ describe Rollbar::Middleware::Sinatra, :reconfigure_notifier => true do
 
       it 'appears in the sent payload when application/json is the content type' do
         expect do
-          post '/crash_post', params.to_json, { 'CONTENT_TYPE' => 'application/json' }
+          post '/crash_post', params.to_json, 'CONTENT_TYPE' => 'application/json'
         end.to raise_error(exception)
 
         expect(Rollbar.last_report[:request][:body]).to be_eql(params.to_json)
@@ -154,7 +190,7 @@ describe Rollbar::Middleware::Sinatra, :reconfigure_notifier => true do
 
       it 'appears in the sent payload when the accepts header contains json' do
         expect do
-          post '/crash_post', params, { 'ACCEPT' => 'application/vnd.github.v3+json' }
+          post '/crash_post', params, 'ACCEPT' => 'application/vnd.github.v3+json'
         end.to raise_error(exception)
 
         expect(Rollbar.last_report[:request][:POST]).to be_eql(params)
@@ -191,6 +227,73 @@ describe Rollbar::Middleware::Sinatra, :reconfigure_notifier => true do
         end.to raise_error(exception)
 
         expect(Rollbar.last_report[:person]).to be_eql({})
+      end
+    end
+
+    describe 'configuration.locals', :if => RUBY_VERSION >= '2.3.0' &&
+                                            !(defined?(RUBY_ENGINE) && RUBY_ENGINE == 'jruby') do
+      context 'when locals is enabled' do
+        before do
+          Rollbar.configure do |config|
+            config.send_extra_frame_data = :all
+            config.locals = { :enabled => true }
+          end
+        end
+
+        let(:locals) do
+          [
+            {
+              :obj => 'Post',
+              :bar => 'bar',
+              :hash => {:foo => 'Post', :bar => 'bar'},
+              :foo => 'Post',
+              :_index => 0
+            },
+            {
+              :foo => 'Post', :_index => 0
+            },
+            {
+              :foo => 'Post', :_index => 0
+            },
+            {
+              :foo => 'Post', :index => 0
+            },
+            {
+              :foo => 'Post'
+            }
+          ]
+        end
+
+        it 'should include locals in extra data' do
+          logger_mock.should_receive(:info).with('[Rollbar] Success').once
+
+          expect { get '/cause_exception_with_locals' }.to raise_exception(NoMethodError)
+
+          frames = Rollbar.last_report[:body][:trace][:frames]
+
+          expect(frames[-1][:locals]).to be_eql(locals[0])
+          expect(frames[-2][:locals]).to be_eql(locals[1])
+          expect(frames[-3][:locals]).to be_eql(locals[2])
+          expect(frames[-4][:locals]).to be_eql(locals[3])
+          # Frames: -5, -6 are not app frames, and have different contents in
+          # different Ruby versions.
+          expect(frames[-7][:locals]).to be_eql(locals[4])
+        end
+      end
+
+      context 'when locals is not enabled' do
+        before do
+          Rollbar.configure do |config|
+            config.send_extra_frame_data = :all
+          end
+        end
+
+        it 'should not include locals in extra data' do
+          logger_mock.should_receive(:info).with('[Rollbar] Success').once
+
+          expect { get '/cause_exception_with_locals' }.to raise_exception(NoMethodError)
+          expect(Rollbar.last_report[:body][:trace][:frames][-1][:locals]).to be_eql(nil)
+        end
       end
     end
   end

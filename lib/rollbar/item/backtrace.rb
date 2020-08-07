@@ -32,7 +32,7 @@ module Rollbar
         end
       end
 
-      alias_method :build, :to_h
+      alias build to_h
 
       def get_file_lines(filename)
         files[filename] ||= read_file(filename)
@@ -44,7 +44,7 @@ module Rollbar
         return unless File.exist?(filename)
 
         File.read(filename).split("\n")
-      rescue
+      rescue StandardError
         nil
       end
 
@@ -74,9 +74,19 @@ module Rollbar
       end
 
       def map_frames(current_exception)
-        exception_backtrace(current_exception).reverse.map do |frame|
+        frames = cleaned_backtrace(current_exception).map do |frame|
           Rollbar::Item::Frame.new(self, frame,
                                    :configuration => configuration).to_h
+        end
+        frames.reverse!
+      end
+
+      def cleaned_backtrace(current_exception)
+        normalized_backtrace = exception_backtrace(current_exception)
+        if configuration.backtrace_cleaner
+          configuration.backtrace_cleaner.clean(normalized_backtrace)
+        else
+          normalized_backtrace
         end
       end
 

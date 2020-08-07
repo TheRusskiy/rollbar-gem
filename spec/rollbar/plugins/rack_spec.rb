@@ -7,10 +7,10 @@ require 'rollbar'
 Rollbar.plugins.load!
 
 describe Rollbar::Middleware::Rack::Builder, :reconfigure_notifier => true do
-  class RackMockError < Exception; end
+  class RackMockError < RuntimeError; end
 
   let(:action) do
-    proc { fail(RackMockError, 'the-error') }
+    proc { raise(RackMockError, 'the-error') }
   end
 
   let(:app) do
@@ -29,6 +29,20 @@ describe Rollbar::Middleware::Rack::Builder, :reconfigure_notifier => true do
   it 'reports the error to Rollbar' do
     expect(Rollbar).to receive(:log).with(uncaught_level, exception, :use_exception_level_filters => true)
     expect { request.get('/will_crash') }.to raise_error(exception)
+  end
+
+  context 'with capture_uncaught == false' do
+    before do
+      Rollbar.configure do |config|
+        config.capture_uncaught = false
+      end
+    end
+
+    it 'should not report the exception' do
+      expect(Rollbar).to_not receive(:log)
+
+      expect { request.get('/will_crash') }.to raise_error(exception)
+    end
   end
 
   context 'with GET parameters' do
@@ -59,9 +73,23 @@ describe Rollbar::Middleware::Rack::Builder, :reconfigure_notifier => true do
     end
   end
 
+  context 'with sensitive body parameters' do
+    let(:params) do
+      { 'password' => 'value' }
+    end
+
+    it 'scrubs the body' do
+      expect do
+        request.post('/will_crash', :input => params.to_json, 'CONTENT_TYPE' => 'application/json')
+      end.to raise_error(exception)
+
+      expect(Rollbar.last_report[:request][:body]).to be_eql("{\"password\":\"******\"}")
+    end
+  end
+
   context 'with array POST parameters' do
     let(:params) do
-      [{ :key => 'value'}, 'string', 10]
+      [{ :key => 'value' }, 'string', 10]
     end
 
     it 'sends a body.multi key in params' do
@@ -70,16 +98,16 @@ describe Rollbar::Middleware::Rack::Builder, :reconfigure_notifier => true do
       end.to raise_error(exception)
 
       reported_body = Rollbar.last_report[:request][:body]
-      expect(reported_body).to be_eql({ 'body.multi' => [{'key' => 'value'}, 'string', 10] }.to_json)
+      expect(reported_body).to be_eql({ 'body.multi' => [{ 'key' => 'value' }, 'string', 10] }.to_json)
     end
   end
 
   context 'with not array or hash POST parameters' do
-    let(:params) { 1000 }
+    let(:params) { 'test string' }
 
     it 'sends a body.multi key in params' do
       expect do
-        request.post('/will_crash', :input => params.to_json, 'CONTENT_TYPE' => 'application/json')
+        request.post('/will_crash', :input => params, 'CONTENT_TYPE' => 'application/json')
       end.to raise_error(exception)
 
       reported_body = Rollbar.last_report[:request][:body]

@@ -8,6 +8,7 @@ module Rollbar
     attr_accessor :async_handler
     attr_accessor :branch
     attr_reader :before_process
+    attr_accessor :capture_uncaught
     attr_accessor :code_version
     attr_accessor :custom_data_method
     attr_accessor :delayed_job_enabled
@@ -16,16 +17,17 @@ module Rollbar
     attr_accessor :disable_monkey_patch
     attr_accessor :disable_rack_monkey_patch
     attr_accessor :disable_core_monkey_patch
+    attr_accessor :enable_error_context
     attr_accessor :dj_threshold
     attr_accessor :enabled
     attr_accessor :endpoint
     attr_accessor :environment
     attr_accessor :exception_level_filters
     attr_accessor :failover_handlers
-    attr_accessor :filepath
     attr_accessor :framework
     attr_accessor :ignored_person_ids
     attr_accessor :host
+    attr_accessor :locals
     attr_writer :logger
     attr_accessor :payload_options
     attr_accessor :person_method
@@ -55,23 +57,36 @@ module Rollbar
     attr_reader :transform
     attr_accessor :verify_ssl_peer
     attr_accessor :use_async
+    attr_accessor :async_json_payload
     attr_reader :use_eventmachine
     attr_accessor :web_base
-    attr_accessor :write_to_file
     attr_reader :send_extra_frame_data
     attr_accessor :use_exception_level_filters_default
     attr_accessor :proxy
+    attr_accessor :raise_on_error
+    attr_accessor :transmit
+    attr_accessor :log_payload
+    attr_accessor :backtrace_cleaner
+
+    attr_accessor :write_to_file
+    attr_accessor :filepath
+    attr_accessor :files_with_pid_name_enabled
+    attr_accessor :files_processed_enabled
+    attr_accessor :files_processed_duration # seconds
+    attr_accessor :files_processed_size # bytes
 
     attr_reader :project_gem_paths
+    attr_accessor :configured_options
 
-    alias_method :safely?, :safely
+    alias safely? safely
 
-    DEFAULT_ENDPOINT = 'https://api.rollbar.com/api/1/item/'
-    DEFAULT_WEB_BASE = 'https://rollbar.com'
+    DEFAULT_ENDPOINT = 'https://api.rollbar.com/api/1/item/'.freeze
+    DEFAULT_WEB_BASE = 'https://rollbar.com'.freeze
 
     def initialize
       @async_handler = nil
       @before_process = []
+      @capture_uncaught = nil
       @code_version = nil
       @custom_data_method = nil
       @default_logger = lambda { ::Logger.new(STDERR) }
@@ -80,6 +95,7 @@ module Rollbar
       @disable_monkey_patch = false
       @disable_core_monkey_patch = false
       @disable_rack_monkey_patch = false
+      @enable_error_context = true
       @dj_threshold = 0
       @enabled = nil # set to true when configure is called
       @endpoint = DEFAULT_ENDPOINT
@@ -105,12 +121,13 @@ module Rollbar
       @net_retries = 3
       @js_enabled = false
       @js_options = {}
+      @locals = {}
       @scrub_fields = [:passwd, :password, :password_confirmation, :secret,
                        :confirm_password, :password_confirmation, :secret_token,
-                       :api_key, :access_token, :session_id]
+                       :api_key, :access_token, :accessToken, :session_id]
       @scrub_user = true
       @scrub_password = true
-      @randomize_scrub_length = true
+      @randomize_scrub_length = false
       @scrub_whitelist = []
       @uncaught_exception_level = 'error'
       @scrub_headers = ['Authorization']
@@ -118,20 +135,32 @@ module Rollbar
       @safely = false
       @transform = []
       @use_async = false
+      @async_json_payload = false
       @use_eventmachine = false
       @verify_ssl_peer = true
       @web_base = DEFAULT_WEB_BASE
-      @write_to_file = false
       @send_extra_frame_data = :none
       @project_gem_paths = []
       @use_exception_level_filters_default = false
       @proxy = nil
+      @raise_on_error = false
+      @transmit = true
+      @log_payload = false
       @collect_user_ip = true
       @anonymize_user_ip = false
+      @backtrace_cleaner = nil
       @hooks = {
         :on_error_response => nil, # params: response
-        :on_report_internal_error => nil, # params: exception
+        :on_report_internal_error => nil # params: exception
       }
+
+      @write_to_file = false
+      @files_with_pid_name_enabled = false
+      @files_processed_enabled = false
+      @files_processed_duration = 60
+      @files_processed_size = 5 * 1000 * 1000
+
+      @configured_options = ConfiguredOptions.new(self)
     end
 
     def initialize_copy(orig)
@@ -139,9 +168,18 @@ module Rollbar
 
       instance_variables.each do |var|
         instance_var = instance_variable_get(var)
-        instance_variable_set(var, Rollbar::Util::deep_copy(instance_var))
+        instance_variable_set(var, Rollbar::Util.deep_copy(instance_var))
       end
     end
+
+    def wrapped_clone
+      original_clone.tap do |new_config|
+        new_config.configured_options = ConfiguredOptions.new(new_config)
+        new_config.configured_options.configured = configured_options.configured
+      end
+    end
+    alias original_clone clone
+    alias clone wrapped_clone
 
     def merge(options)
       new_configuration = clone
@@ -210,9 +248,10 @@ module Rollbar
       value.is_a?(Hash) ? use_sidekiq(value) : use_sidekiq
     end
 
-    def use_thread
+    def use_thread(options = {})
       require 'rollbar/delay/thread'
       @use_async = true
+      Rollbar::Delay::Thread.options = options
       @async_handler = Rollbar::Delay::Thread
     end
 
@@ -222,7 +261,7 @@ module Rollbar
       @async_handler  = Rollbar::Delay::SuckerPunch
     end
 
-    def use_sucker_punch=(value)
+    def use_sucker_punch=(_value)
       deprecation_message = '#use_sucker_punch=(value) has been deprecated in favor of #use_sucker_punch. Please update your rollbar configuration.'
       defined?(ActiveSupport) ? ActiveSupport::Deprecation.warn(deprecation_message) : puts(deprecation_message)
 
@@ -239,7 +278,10 @@ module Rollbar
         found = Gem::Specification.each.select { |spec| name === spec.name }
         puts "[Rollbar] No gems found matching #{name.inspect}" if found.empty?
         found
-      end.flatten.uniq.map(&:gem_dir)
+      end
+      @project_gem_paths.flatten!
+      @project_gem_paths.uniq!
+      @project_gem_paths.map!(&:gem_dir)
     end
 
     def before_process=(*handler)
@@ -266,7 +308,11 @@ module Rollbar
     end
 
     def logger_level=(level)
-      @logger_level = level.to_sym
+      @logger_level = if level
+                        level.to_sym
+                      else
+                        level
+                      end
     end
 
     def logger
@@ -274,19 +320,41 @@ module Rollbar
     end
 
     def hook(symbol, &block)
-      if @hooks.has_key?(symbol)
+      if @hooks.key?(symbol)
         if block_given?
           @hooks[symbol] = block
         else
           @hooks[symbol]
         end
       else
-        raise StandardError.new "Hook :" + symbol.to_s + " is not supported by Rollbar SDK."
+        raise StandardError, 'Hook :' + symbol.to_s + ' is not supported by Rollbar SDK.'
       end
     end
 
     def execute_hook(symbol, *args)
       hook(symbol).call(*args) if hook(symbol).is_a?(Proc)
+    end
+  end
+
+  class ConfiguredOptions
+    attr_accessor :configuration, :configured
+
+    def initialize(configuration)
+      @configuration = configuration
+      @configured = {}
+    end
+
+    def method_missing(method, *args, &block)
+      return super unless configuration.respond_to?(method)
+
+      method_string = method.to_s
+      configured[method_string.chomp('=').to_sym] = args.first if method_string.end_with?('=')
+
+      configuration.send(method, *args, &block)
+    end
+
+    def respond_to_missing?(method)
+      configuration.respond_to?(method) || super
     end
   end
 end

@@ -1,6 +1,6 @@
 require 'spec_helper'
 
-require 'sidekiq' unless RUBY_VERSION == '1.8.7'
+require 'sidekiq'
 
 Rollbar.plugins.load!
 
@@ -12,7 +12,7 @@ describe Rollbar::Sidekiq, :reconfigure_notifier => false do
     let(:job_hash) do
       {
         'class' => 'FooWorker',
-        'args' => %w(foo bar),
+        'args' => %w[foo bar],
         'queue' => 'default',
         'jid' => '96aa59723946616dff537e97',
         'enqueued_at' => Time.now.to_f,
@@ -166,4 +166,4 @@ describe Rollbar::Sidekiq, :reconfigure_notifier => false do
       expect { subject.call(nil, msg, nil, &middleware_block) }.to raise_error(exception)
     end
   end
-end unless RUBY_VERSION == '1.8.7'
+end

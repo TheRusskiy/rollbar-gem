@@ -8,12 +8,14 @@ describe Rollbar::Item do
   let(:safely_notifier) { double('safely_notifier') }
   let(:logger) { double }
   let(:configuration) do
-    c = Rollbar::Configuration.new
-    c.enabled = true
-    c.access_token = 'footoken'
-    c.root = '/foo/'
-    c.framework = 'Rails'
-    c
+    Rollbar.configure do |c|
+      c.enabled = true
+      c.access_token = 'footoken'
+      c.randomize_scrub_length = false
+      c.root = '/foo/'
+      c.framework = 'Rails'
+    end
+    Rollbar.configuration
   end
   let(:level) { 'info' }
   let(:message) { 'message' }
@@ -51,7 +53,7 @@ describe Rollbar::Item do
       end
 
       it 'should have the correct root-level keys' do
-        payload.keys.should match_array(['access_token', 'data'])
+        payload.keys.should match_array(['data'])
       end
 
       it 'should have the correct data keys' do
@@ -122,42 +124,56 @@ describe Rollbar::Item do
       payload['data'][:body][:message][:extra][:a].should == 1
       payload['data'][:body][:message][:extra][:b][2].should == 4
     end
-    
+
+    context 'ActiveSupport >= 4.1', :if => Gem.loaded_specs['activesupport'].version >= Gem::Version.new('4.1') do
+      it 'should have correct configured_options object' do
+        payload['data'][:notifier][:configured_options][:access_token].should == '******'
+        payload['data'][:notifier][:configured_options][:root].should == '/foo/'
+        payload['data'][:notifier][:configured_options][:framework].should == 'Rails'
+      end
+    end
+
+    context 'ActiveSupport < 4.1', :if => Gem.loaded_specs['activesupport'].version < Gem::Version.new('4.1') do
+      it 'should have configured_options message' do
+        payload['data'][:notifier][:configured_options].class == 'String'
+      end
+    end
+
     context do
       let(:context) { { :controller => "ExampleController" } }
-    
+
       it 'should have access to the context in custom_data_method' do
         configuration.custom_data_method = lambda do |message, exception, context|
           { :result => "MyApp#" + context[:controller] }
         end
-  
+
         payload['data'][:body][:message][:extra].should_not be_nil
         payload['data'][:body][:message][:extra][:result].should == "MyApp#"+context[:controller]
       end
-      
+
       it 'should not include data passed in :context if there is no custom_data_method configured' do
         configuration.custom_data_method = nil
-  
+
         payload['data'][:body][:message][:extra].should be_nil
       end
-      
+
       it 'should have access to the message in custom_data_method' do
         configuration.custom_data_method = lambda do |message, exception, context|
           { :result => "Transformed in custom_data_method: " + message }
         end
-        
+
         payload['data'][:body][:message][:extra].should_not be_nil
         payload['data'][:body][:message][:extra][:result].should == "Transformed in custom_data_method: " + message
       end
-      
+
       context do
         let(:exception) { Exception.new "Exception to test custom_data_method" }
-        
+
         it 'should have access to the current exception in custom_data_method' do
           configuration.custom_data_method = lambda do |message, exception, context|
             { :result => "Transformed in custom_data_method: " + exception.message }
           end
-          
+
           payload['data'][:body][:trace][:extra].should_not be_nil
           payload['data'][:body][:trace][:extra][:result].should == "Transformed in custom_data_method: " + exception.message
         end
@@ -383,6 +399,22 @@ describe Rollbar::Item do
         end
       end
 
+      context 'with error context' do
+        let(:context) do
+          {:key => 'value', :hash => {:inner_key => 'inner_value'}}
+        end
+        it 'should build exception data with a extra data' do
+          exception.rollbar_context = context
+
+          body = payload['data'][:body]
+          trace = body[:trace]
+
+          trace[:exception][:message].should match(/^(undefined local variable or method `bar'|undefined method `bar' on an instance of)/)
+          trace[:extra][:key].should == 'value'
+          trace[:extra][:hash].should == {:inner_key => 'inner_value'}
+        end
+      end
+
       context 'with nested exceptions' do
         let(:crashing_code) do
           proc do
@@ -533,7 +565,6 @@ describe Rollbar::Item do
       context 'with mutation in payload' do
         let(:new_payload) do
           {
-            'access_token' => configuration.access_token,
             'data' => {
             }
           }
@@ -668,20 +699,85 @@ describe Rollbar::Item do
   end # end #build
 
   describe '#dump' do
-    context 'with Redis instance in payload and ActiveSupport is enabled' do
-      let(:redis) { ::Redis.new }
+    context 'with recursing instance in payload and ActiveSupport is enabled' do
+      class Recurse
+        # ActiveSupport also hijacks #to_json, but relies on #as_json to do its real work.
+        # The implementation is different earlier vs later than 4.0, but both can
+        # be made to fail in the same way with this construct.
+        def as_json(*)
+          { :self => self }
+        end
+      end
+
       let(:payload) do
         {
           :key => {
-            :value => redis
+            :value => Recurse.new
           }
         }
       end
       let(:item) { Rollbar::Item.build_with(payload) }
 
-      it 'dumps to JSON correctly' do
-        redis.set('foo', 'bar')
-        json = item.dump
+      it "doesn't fail in ActiveSupport >= 4.1" do
+        begin
+          _json = item.dump
+
+        # If you get an uninitialized constant "Java" error, it just means an unexpected exception
+        # occurred (i.e. one not in the below list) and caused Java::JavaLang::StackOverflowError.
+        # If the test case is working correctly, this shouldn't happen ang the Java error type
+        # will only be evaluated on JRuby builds.
+        rescue NoMemoryError,
+               SystemStackError,
+               ActiveSupport::JSON::Encoding::CircularReferenceError,
+               Java::JavaLang::StackOverflowError
+
+          # If ActiveSupport is invoked, we'll end up here.
+          # Item#dump fails with SystemStackError (ActiveSupport > 4.0)
+          # or NoMemoryError (ActiveSupport <= 4.0) which, as system exceptions
+          # not a StandardError, cannot be tested by `expect().to raise_error`
+          error = :SystemError
+        end
+
+        if Gem::Version.new(ActiveSupport::VERSION::STRING) >= Gem::Version.new('4.1.0')
+          expect(error).not_to be_eql(:SystemError)
+        else
+          # This ActiveSupport is vulnerable to circular reference errors, and is
+          # virtually impossible to correct, because these versions of AS even hook into
+          # core Ruby JSON.
+          expect(error).to be_eql(:SystemError)
+        end
+      end
+    end
+
+    context 'with Redis::Connection payload and ActiveSupport is enabled' do
+      # This tests an issue in ActiveSupport 4.1.x - 5.1.x, where the JSON serializer
+      # calls `to_a` on a TCPSocket object and hangs because of a bug in BasicSocket.
+      #
+      # See lib/rollbar/plugins/basic_socket.rb for the relevant patch.
+      #
+      # The test has been refactored here to not require a full redis client and
+      # dependency on redis-server. Trying to instantiate just a TCPSocket (or similar)
+      # didn't exercise the failure condition.
+      #
+      let(:redis_connection) do
+        ::Redis::Connection::Ruby.connect(:host => '127.0.0.1', :port => 6370) # try to pick a polite port
+      end
+
+      let(:payload) do
+        {
+          :key => {
+            :value => redis_connection
+          }
+        }
+      end
+      let(:item) { Rollbar::Item.build_with(payload) }
+
+      it 'serializes Redis::Connection without crash or hang' do
+        json = nil
+
+        ::TCPServer.open('127.0.0.1', 6370) do |_serv|
+          json = item.dump
+        end
 
         expect(json).to be_kind_of(String)
       end
@@ -702,14 +798,15 @@ describe Rollbar::Item do
 
       it 'calls Notifier#send_failsafe and logs the error' do
         original_size = Rollbar::JSON.dump(payload).bytesize
-        final_size = Rollbar::Truncation.truncate(payload.clone).bytesize
+        attempts = []
+        final_size = Rollbar::Truncation.truncate(Rollbar::Util.deep_copy(payload), attempts).bytesize
         # final_size = original_size
-        rollbar_message = "Could not send payload due to it being too large after truncating attempts. Original size: #{original_size} Final size: #{final_size}"
+        rollbar_message = "Could not send payload due to it being too large after truncating attempts. Original size: #{original_size} Attempts: #{attempts.join(', ')} Final size: #{final_size}"
         uuid = payload['data']['uuid']
         host = payload['data']['server']['host']
         log_message = "[Rollbar] Payload too large to be sent for UUID #{uuid}: #{Rollbar::JSON.dump(payload)}"
 
-        expect(notifier).to receive(:send_failsafe).with(rollbar_message, nil, uuid, host)
+        expect(notifier).to receive(:send_failsafe).with(rollbar_message, nil, hash_including(:uuid => uuid, :host => host))
         expect(logger).to receive(:error).with(log_message)
 
         item.dump
@@ -719,13 +816,14 @@ describe Rollbar::Item do
         it 'calls Notifier#send_failsafe and logs the error' do
           payload['data'].delete('server')
           original_size = Rollbar::JSON.dump(payload).bytesize
-          final_size = Rollbar::Truncation.truncate(payload.clone).bytesize
+          attempts = []
+          final_size = Rollbar::Truncation.truncate(Rollbar::Util.deep_copy(payload), attempts).bytesize
           # final_size = original_size
-          rollbar_message = "Could not send payload due to it being too large after truncating attempts. Original size: #{original_size} Final size: #{final_size}"
+          rollbar_message = "Could not send payload due to it being too large after truncating attempts. Original size: #{original_size} Attempts: #{attempts.join(', ')} Final size: #{final_size}"
           uuid = payload['data']['uuid']
           log_message = "[Rollbar] Payload too large to be sent for UUID #{uuid}: #{Rollbar::JSON.dump(payload)}"
 
-          expect(notifier).to receive(:send_failsafe).with(rollbar_message, nil, uuid, nil)
+          expect(notifier).to receive(:send_failsafe).with(rollbar_message, nil, hash_including(:uuid => uuid))
           expect(logger).to receive(:error).with(log_message)
 
           item.dump

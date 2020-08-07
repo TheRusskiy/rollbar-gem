@@ -129,6 +129,7 @@ An array of backup handlers if the async handlers fails. Each should respond to
 
 For use with `write_to_file`. Indicates location of the rollbar log file being
 tracked by [rollbar-agent](https://github.com/rollbar/rollbar-agent).
+Enable `files_with_pid_name_enabled` if you want to have different files for each process(only works if extension `rollbar`)
 
 ### framework
 
@@ -241,6 +242,15 @@ otherwise reports the error to Rollbar.
 Fields to scrub out of the parsed request data. Will scrub from `GET`, `POST`,
 url, and several other locations. Does not currently recurse into the full
 payload.
+
+If set to `[:scrub_all]` it will scrub all fields. It will not scrub anything
+that is in the scrub_whitelist configuration array even if :scrub_all is true.
+
+### scrub_whitelist
+
+Set the list of fields to be whitelisted when `scrub_fields` is set to `[:scrub_all]`.
+
+Supports regex entries for partial matching e.g. `[:foo, /\A.+_id\z/, :bar]`
 
 ### scrub_user
 

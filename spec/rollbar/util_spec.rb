@@ -1,4 +1,4 @@
-# encoding: utf-8
+# encoding: UTF-8
 
 require 'spec_helper'
 
@@ -67,8 +67,7 @@ describe Rollbar::Util do
         result = Rollbar::Util.deep_merge(data1, data2)
 
         expect(result.keys).to be_eql(merged.keys)
-        # The version of RSpec required by 1.8.7 (2.xx) can't evaluate this correctly.
-        expect(result[:array]).to be_eql(merged[:array]) unless RUBY_VERSION == '1.8.7'
+        expect(result[:array]).to be_eql(merged[:array])
         expect(result[:foo]).to be_eql(merged[:foo])
         expect(result[:bar]).to be_eql(merged[:bar])
         expect(result[:c].keys).to be_eql(merged[:c].keys)
@@ -95,12 +94,22 @@ describe Rollbar::Util do
       it "doesn't crash and returns same hash" do
         result = Rollbar::Util.deep_copy(data)
 
-        # The version of RSpec required by 1.8.7 (2.xx) can't evaluate this correctly.
-        if RUBY_VERSION == '1.8.7'
-          expect(result.keys).to be_eql(data.keys) unless RUBY_VERSION == '1.8.7'
-        else
-          expect(result).to be_eql(data) unless RUBY_VERSION == '1.8.7'
-        end
+        expect(result).to be_eql(data)
+      end
+    end
+
+    context 'with frozen data' do
+      let(:data) do
+        {
+          :foo => ['bar', 'baz', 'buzz'].freeze,
+          :baz => 'buzz'.freeze
+        }
+      end
+
+      it "doesn't raise FrozenError" do
+        result = Rollbar::Util.deep_copy(data)
+
+        expect(result).to be_eql(data)
       end
     end
   end
@@ -111,9 +120,7 @@ describe Rollbar::Util do
     #
     # This should just check that in payload with simple values and
     # nested values are each one passed through Rollbar::Encoding.encode
-    context 'with utf8 string and ruby > 1.8' do
-      next unless String.instance_methods.include?(:force_encoding)
-
+    context 'with utf8 string' do
       let(:payload) { { :foo => 'Изменение' } }
 
       it 'just returns the same string' do
@@ -130,7 +137,7 @@ describe Rollbar::Util do
       payload = {
         :bad_value => force_to_ascii("bad value 1\255"),
         :bad_value_2 => force_to_ascii("bad\255 value 2"),
-        force_to_ascii("bad\255 key") => "good value",
+        force_to_ascii("bad\255 key") => 'good value',
         :hash => {
           :inner_bad_value => force_to_ascii("\255\255bad value 3"),
           bad_key.to_sym => 'inner good value',
@@ -144,23 +151,24 @@ describe Rollbar::Util do
         }
       }
 
-
       payload_copy = payload.clone
       described_class.enforce_valid_utf8(payload_copy)
 
-      payload_copy[:bad_value].should == "bad value 1"
-      payload_copy[:bad_value_2].should == "bad value 2"
-      payload_copy["bad key"].should == "good value"
+      payload_copy[:bad_value].should eq('bad value 1')
+      payload_copy[:bad_value_2].should eq('bad value 2')
+      payload_copy['bad key'].should eq('good value')
       payload_copy.keys.should_not include("bad\456 key")
-      payload_copy[:hash][:inner_bad_value].should == "bad value 3"
-      payload_copy[:hash][:"inner bad key"].should == 'inner good value'
-      payload_copy[:hash]["bad array key"].should == [
-        'good array value 1',
-        'bad array value 1',
-        {
-          :inner_inner_bad => 'bad inner inner value'
-        }
-      ]
+      payload_copy[:hash][:inner_bad_value].should eq('bad value 3')
+      payload_copy[:hash][:"inner bad key"].should eq('inner good value')
+      payload_copy[:hash]['bad array key'].should eq(
+        [
+          'good array value 1',
+          'bad array value 1',
+          {
+            :inner_inner_bad => 'bad inner inner value'
+          }
+        ]
+      )
     end
   end
 end

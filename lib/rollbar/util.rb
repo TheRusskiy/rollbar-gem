@@ -2,6 +2,10 @@ require 'rollbar/util/hash'
 
 module Rollbar
   module Util # :nodoc:
+    def self.iterate_and_update_with_block(obj, &block)
+      iterate_and_update(obj, block)
+    end
+
     def self.iterate_and_update(obj, block, seen = {})
       return if obj.frozen? || seen[obj.object_id]
 
@@ -63,9 +67,9 @@ module Rollbar
 
     def self.clone_obj(obj)
       if obj.is_a?(::Hash)
-        obj.clone
+        obj.dup
       elsif obj.is_a?(Array)
-        obj.clone.clear
+        obj.dup.clear
       else
         obj
       end
